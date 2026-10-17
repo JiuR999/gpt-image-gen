@@ -1,15 +1,24 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
-  Settings, Image as ImageIcon, Loader2, Plus, Trash2, 
+  Settings, Image as ImageIcon, Loader2, Trash2, 
   CheckCircle2, AlertCircle, Upload, X, Play, Clock, Server, Sparkles, History, Download, Wallet, RefreshCw, User
 } from 'lucide-react';
+
+const API_BASE = '/pearapi';
+const MODELS_API_URL = `${API_BASE}/system/auth/models/all?type=image`;
+const DEFAULT_SIZES = ['auto', '1:1', '16:9', '9:16', '4:3', '3:4'];
+const FALLBACK_MODELS = ['gpt-image-2', 'grok-4-image', 'midjourney-v6', 'dall-e-3'].map(id => ({
+  model_id: id,
+  model_name: id,
+  billing_type: 'count',
+}));
 
 // 辅助函数：从本地存储获取数据
 const getStoredItem = (key, defaultValue) => {
   try {
     const stored = localStorage.getItem(key);
     return stored ? JSON.parse(stored) : defaultValue;
-  } catch (e) {
+  } catch {
     return defaultValue;
   }
 };
@@ -18,16 +27,80 @@ const getStoredItem = (key, defaultValue) => {
 const setStoredItem = (key, value) => {
   try {
     localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.error('Failed to save to localStorage', e);
+  } catch {
+    console.error('Failed to save to localStorage');
   }
+};
+
+// 辅助函数：读取缓存的模型列表（无缓存时用兜底列表）
+const loadCachedModels = () => {
+  const cached = getStoredItem('pear_api_models', []);
+  return Array.isArray(cached) && cached.length > 0 ? cached : FALLBACK_MODELS;
+};
+
+// 辅助函数：兼容多语言字段（对象取 zh，字符串直接返回）
+const i18nText = (value) => (typeof value === 'string' ? value : value?.zh || '');
+
+// 辅助函数：解析模型支持的尺寸比例字符串（如 "9:16、16:9、auto"）
+const parseAspectRatios = (str) => (typeof str === 'string' ? str.match(/\d+:\d+|auto/g) || [] : []);
+
+// 辅助函数：生成模型单价短文案（用于下拉/列表行内展示）
+const formatPriceShort = (model) => {
+  if (!model) return '';
+  const summary = i18nText(model.billing_summary);
+  if (model.billing_type === 'token') {
+    if (model.input_price != null && model.output_price != null) {
+      return `¥${model.input_price}/${model.output_price} 每百万tokens`;
+    }
+    return summary;
+  }
+  if (model.price != null) {
+    return model.billing_type === 'duration' ? `¥${model.price} 起` : `¥${model.price}/次`;
+  }
+  return summary;
+};
+
+// 辅助函数：读取渠道显示名（优先中文，其次原文）
+const channelLabel = (model) => {
+  const text = i18nText(model?.channel_type_i18n);
+  return text || (typeof model?.channel_type === 'string' ? model.channel_type : '');
+};
+
+// 辅助函数：判断是否为"默认"渠道
+const isDefaultChannel = (model) => {
+  const label = channelLabel(model);
+  return label === '默认' || model?.channel_type_i18n?.en === 'Default';
+};
+
+// 辅助函数：为指定模型挑选默认渠道变体（优先"默认"渠道，否则取第一个）
+const pickDefaultVariant = (variants) =>
+  variants.find(v => isDefaultChannel(v)) || variants[0] || null;
+
+// 辅助函数：按 model_id 分组（保持首次出现顺序），用于列表去重
+const groupModelsByModelId = (models) => {
+  const map = new Map();
+  models.forEach(m => {
+    if (!map.has(m.model_id)) map.set(m.model_id, []);
+    map.get(m.model_id).push(m);
+  });
+  return Array.from(map.values());
+};
+
+// 辅助函数：生成模型列表行的价格文案（多渠道取最低价并加"起"字）
+const formatPriceForList = (variants) => {
+  if (!variants || variants.length === 0) return '';
+  if (variants.length === 1) return formatPriceShort(variants[0]);
+  const prices = variants.map(v => v.price).filter(p => p != null);
+  if (prices.length === 0) return formatPriceShort(variants[0]);
+  return `¥${Math.min(...prices)} 起`;
 };
 
 export default function App() {
   // --- 状态管理 ---
   const [apiKey, setApiKey] = useState(() => getStoredItem('pear_api_key', '3e93dd710fb64a2d'));
-  const [models, setModels] = useState(() => getStoredItem('pear_models', ['grok-4-image', 'midjourney-v6', 'dall-e-3']));
-  const [newModelName, setNewModelName] = useState('');
+  const [apiModels, setApiModels] = useState(loadCachedModels);
+  const [isModelsLoading, setIsModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState('');
   const [showSettings, setShowSettings] = useState(true);
 
   // 余额状态
@@ -36,7 +109,8 @@ export default function App() {
 
   // 生成参数状态
   const [prompt, setPrompt] = useState('');
-  const [selectedModel, setSelectedModel] = useState(models[0] || '');
+  const [selectedModel, setSelectedModel] = useState(() => loadCachedModels()[0]?.model_id || '');
+  const [activeVariantId, setActiveVariantId] = useState(null); // 当前选中模型的渠道变体 id
   const [size, setSize] = useState('16:9');
   const [taskType, setTaskType] = useState('async'); 
   const [selectedFiles, setSelectedFiles] = useState([]);
@@ -55,12 +129,66 @@ export default function App() {
 
   const pollTimeoutRef = useRef(null);
 
+  // --- 模型派生数据 ---
+  // 按 model_id 分组去重后的列表（供下拉/侧边栏遍历）
+  const modelGroups = useMemo(() => groupModelsByModelId(apiModels), [apiModels]);
+
+  // 当前选中模型的所有渠道变体
+  const selectedVariants = useMemo(
+    () => apiModels.filter(m => m.model_id === selectedModel),
+    [apiModels, selectedModel]
+  );
+
+  // 当前生效的渠道变体（activeVariantId 失效时回退到默认渠道）
+  const activeVariant = useMemo(() => {
+    const found = selectedVariants.find(v => v.id === activeVariantId);
+    return found || pickDefaultVariant(selectedVariants);
+  }, [selectedVariants, activeVariantId]);
+
+  const sizeOptions = useMemo(() => {
+    const parsed = parseAspectRatios(activeVariant?.aspect_ratio);
+    return parsed.length > 0 ? parsed : DEFAULT_SIZES;
+  }, [activeVariant]);
+
+  const maxRefImages = activeVariant?.reference_image != null
+    ? Math.min(activeVariant.reference_image, 8)
+    : 8;
+
+  // 当前渠道变体的清晰度价格档位（如 [["1K", 0.042], ["2K", 0.05]]）
+  const resolutionEntries = useMemo(() => {
+    const rp = activeVariant?.billing_detail?.resolution_prices;
+    return rp && typeof rp === 'object' ? Object.entries(rp) : [];
+  }, [activeVariant]);
+
+  const defaultResolution = activeVariant?.billing_detail?.default_resolution || '';
+
+  // --- 获取历史记录接口 ---
+  const fetchHistory = async () => {
+    if (!apiKey) return;
+    // setIsHistoryLoading(true);
+    console.log(apiKey);
+    try {
+      
+      const response = await fetch(`${API_BASE}/system/auth/task/list?private_key=2d992495-989a-489f-9c64-0b1a722685d1&page=1&pageSize=20`);
+      const data = await response.json();
+      if (data.code === 200) {
+        // console.log(data.data.list);
+        setHistory(data.data.list || []);
+        console.log('His=>', history);
+      }
+    } catch (err) {
+      console.error('Error fetching history:', err);
+    } finally {
+      // setIsHistoryLoading(false);
+    }
+  };
+
   // --- 获取余额接口 ---
   const fetchBalance = async () => {
     if (!apiKey) return;
     setIsBalanceLoading(true);
     try {
-      const response = await fetch(`https://api.pearapi.ai/system/auth/get_balance/?token=${apiKey}`);
+      const response = await fetch(`${API_BASE}/system/auth/get_balance/?token=${apiKey}`);
       const data = await response.json();
       if (data.code === 200) {
         setBalanceData(data.data);
@@ -74,22 +202,70 @@ export default function App() {
     }
   };
 
-  // --- 副作用 ---
-  useEffect(() => {
-    setStoredItem('pear_api_key', apiKey);
-    if (apiKey) {
-      fetchBalance();
-    } else {
-      setBalanceData(null);
+  // // --- 副作用 ---
+  // useEffect(() => {
+  //   setStoredItem('pear_api_key', apiKey);
+  //   if (apiKey) {
+  //     fetchBalance();
+  //   } else {
+  //     setBalanceData(null);
+  //   }
+  // }, [apiKey]);
+
+    // --- 副作用 ---
+    useEffect(() => {
+      setStoredItem('pear_api_key', apiKey);
+      if (apiKey) {
+        fetchBalance();
+        fetchHistory()
+        if (view === 'history') fetchHistory();
+      } else {
+        setBalanceData(null);
+        setHistory([]);
+      }
+    }, [apiKey]);
+
+  // --- 获取模型列表接口 ---
+  const fetchModels = async () => {
+    setIsModelsLoading(true);
+    setModelsError('');
+    try {
+      const response = await fetch(MODELS_API_URL);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.code === 200 && Array.isArray(data.data) && data.data.length > 0) {
+        setApiModels(data.data);
+      } else {
+        throw new Error(i18nText(data.message) || '接口返回数据异常');
+      }
+    } catch (err) {
+      console.error('Error fetching models:', err);
+      setModelsError('模型列表获取失败，已使用本地缓存/默认列表');
+    } finally {
+      setIsModelsLoading(false);
     }
-  }, [apiKey]);
+  };
+
+  // 挂载时拉取模型列表，并清理旧版写死模型的本地存储
+  useEffect(() => {
+    localStorage.removeItem('pear_models');
+    fetchModels();
+  }, []);
 
   useEffect(() => {
-    setStoredItem('pear_models', models);
-    if (!models.includes(selectedModel) && models.length > 0) {
-      setSelectedModel(models[0]);
+    setStoredItem('pear_api_models', apiModels);
+    setSelectedModel(prev => (apiModels.some(m => m.model_id === prev) ? prev : apiModels[0]?.model_id || ''));
+  }, [apiModels]);
+
+  useEffect(() => {
+    if (sizeOptions.length > 0 && !sizeOptions.includes(size)) {
+      setSize(sizeOptions[0]);
     }
-  }, [models]);
+  }, [sizeOptions, size]);
+
+  useEffect(() => {
+    setSelectedFiles(files => (files.length > maxRefImages ? files.slice(0, maxRefImages) : files));
+  }, [maxRefImages]);
 
   useEffect(() => {
     return () => clearTimeout(pollTimeoutRef.current);
@@ -100,27 +276,13 @@ export default function App() {
   }, [history]);
 
   // --- 交互处理 ---
-  const handleAddModel = (e) => {
-    e.preventDefault();
-    const trimmed = newModelName.trim();
-    if (trimmed && !models.includes(trimmed)) {
-      setModels([...models, trimmed]);
-      setNewModelName('');
-      setSelectedModel(trimmed);
-    }
-  };
-
-  const handleRemoveModel = (modelToRemove) => {
-    setModels(models.filter(m => m !== modelToRemove));
-  };
-
   const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
-    if (files.length + selectedFiles.length > 8) {
-      alert('最多只能上传8张图片');
+    if (selectedFiles.length + files.length > maxRefImages) {
+      alert(`当前模型最多上传 ${maxRefImages} 张参考图`);
       return;
     }
-    setSelectedFiles([...selectedFiles, ...files].slice(0, 8));
+    setSelectedFiles([...selectedFiles, ...files].slice(0, maxRefImages));
   };
 
   const handleRemoveFile = (index) => {
@@ -186,7 +348,7 @@ export default function App() {
 
     setStatus(taskType === 'sync' ? 'loading' : 'queued');
 
-    const apiUrl = 'https://api.pearapi.ai/api/image_generate';
+    const apiUrl = `${API_BASE}/api/image_generate`;
     let options = { method: 'POST' };
 
     try {
@@ -240,7 +402,7 @@ export default function App() {
 
   const pollTask = async (taskId) => {
     try {
-      const response = await fetch('https://api.pearapi.ai/api/image_generate', {
+      const response = await fetch(`${API_BASE}/api/image_generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -318,40 +480,47 @@ export default function App() {
 
           {/* 模型管理 */}
           <section className="space-y-3">
-            <h3 className="text-sm font-bold text-slate-500/80 uppercase tracking-wider flex items-center gap-2">
-              <Server className="w-4 h-4" /> 模型管理
-            </h3>
-            
-            <form onSubmit={handleAddModel} className="flex gap-2">
-              <input
-                type="text"
-                value={newModelName}
-                onChange={(e) => setNewModelName(e.target.value)}
-                placeholder="添加新模型..."
-                className="flex-1 bg-white/50 backdrop-blur-sm border border-white/60 rounded-xl px-3 py-2 text-sm text-slate-800 focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none shadow-inner"
-              />
-              <button 
-                type="submit"
-                disabled={!newModelName.trim()}
-                className="bg-indigo-500/10 hover:bg-indigo-500 text-indigo-600 hover:text-white border border-indigo-200 hover:border-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-500/10 disabled:hover:text-indigo-600 disabled:cursor-not-allowed px-3 py-2 rounded-xl transition-colors shadow-sm"
+            <h3 className="text-sm font-bold text-slate-500/80 uppercase tracking-wider flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <Server className="w-4 h-4" /> 模型管理
+              </span>
+              <button
+                onClick={fetchModels}
+                disabled={isModelsLoading}
+                title="刷新模型列表"
+                className="text-indigo-400 hover:text-indigo-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Plus className="w-5 h-5" />
+                <RefreshCw className={`w-3.5 h-3.5 ${isModelsLoading ? 'animate-spin' : ''}`} />
               </button>
-            </form>
+            </h3>
 
-            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-              {models.length === 0 && <p className="text-xs text-slate-500 text-center py-4 bg-white/30 rounded-xl">暂无模型，请添加</p>}
-              {models.map(model => (
-                <div key={model} className="flex items-center justify-between bg-white/40 backdrop-blur-sm p-3 rounded-xl border border-white/60 shadow-sm group hover:bg-white/60 transition-all">
-                  <span className="text-sm font-medium truncate text-slate-700" title={model}>{model}</span>
-                  <button 
-                    onClick={() => handleRemoveModel(model)}
-                    className="text-slate-400 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity bg-white/50 p-1.5 rounded-lg shadow-sm"
+            {modelsError && (
+              <p className="text-xs text-amber-600 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">{modelsError}</p>
+            )}
+
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1 custom-scrollbar">
+              {apiModels.length === 0 && !isModelsLoading && (
+                <p className="text-xs text-slate-500 text-center py-4 bg-white/30 rounded-xl">暂无可用模型</p>
+              )}
+              {modelGroups.map(variants => {
+                const head = variants[0];
+                const active = head.model_id === selectedModel;
+                return (
+                  <button
+                    key={head.model_id}
+                    type="button"
+                    onClick={() => setSelectedModel(head.model_id)}
+                    className={`w-full text-left flex items-center justify-between gap-2 p-3 rounded-xl border shadow-sm transition-all ${
+                      active
+                        ? 'bg-indigo-500/10 border-indigo-300 shadow-indigo-100'
+                        : 'bg-white/40 backdrop-blur-sm border-white/60 hover:bg-white/70'
+                    }`}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <span className="text-sm font-medium truncate text-slate-700" title={head.model_id}>{head.model_name}</span>
+                    <span className="text-xs font-bold text-indigo-600 shrink-0">{formatPriceForList(variants)}</span>
                   </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         </div>
@@ -425,10 +594,17 @@ export default function App() {
                   <select
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
-                    className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-4 py-3 text-sm font-medium focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none shadow-inner text-slate-700 cursor-pointer"
+                    disabled={isModelsLoading && apiModels.length === 0}
+                    className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-4 py-3 text-sm font-medium focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none shadow-inner text-slate-700 cursor-pointer disabled:cursor-wait"
                   >
-                    {models.length === 0 && <option value="">请先在左侧添加模型</option>}
-                    {models.map(m => <option key={m} value={m}>{m}</option>)}
+                    {modelGroups.length === 0 && (
+                      <option value="">{isModelsLoading ? '模型列表加载中...' : '暂无可用模型'}</option>
+                    )}
+                    {modelGroups.map(variants => (
+                      <option key={variants[0].model_id} value={variants[0].model_id}>
+                        {variants[0].model_name}（{formatPriceForList(variants)}）
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="space-y-2">
@@ -438,15 +614,82 @@ export default function App() {
                     onChange={(e) => setSize(e.target.value)}
                     className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-4 py-3 text-sm font-medium focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none shadow-inner text-slate-700 cursor-pointer"
                   >
-                    <option value="auto">Auto (自动)</option>
-                    <option value="1:1">1:1 (正方形)</option>
-                    <option value="16:9">16:9 (横屏)</option>
-                    <option value="9:16">9:16 (竖屏)</option>
-                    <option value="4:3">4:3</option>
-                    <option value="3:4">3:4</option>
+                    {sizeOptions.map(r => (
+                      <option key={r} value={r}>{r === 'auto' ? 'Auto (自动)' : r}</option>
+                    ))}
                   </select>
                 </div>
               </div>
+
+              {activeVariant && (
+                <div className="bg-white/40 backdrop-blur-sm border border-white/60 rounded-2xl p-4 space-y-2 shadow-inner">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {activeVariant.provider && (
+                      <span className="bg-indigo-50/80 text-indigo-600 text-xs font-bold px-2.5 py-0.5 rounded-md border border-indigo-100">
+                        {activeVariant.provider}
+                      </span>
+                    )}
+                    {selectedVariants.length > 1 ? (
+                      selectedVariants.map(v => {
+                        const isActive = v.id === activeVariant.id;
+                        return (
+                          <button
+                            key={v.id}
+                            type="button"
+                            onClick={() => setActiveVariantId(v.id)}
+                            title={`切换到${channelLabel(v) || '该渠道'}（${formatPriceShort(v)}）`}
+                            className={`text-xs font-bold px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                              isActive
+                                ? 'bg-indigo-500 text-white border-indigo-500 shadow-sm'
+                                : 'bg-white/80 text-slate-500 border-white hover:border-indigo-300 hover:text-indigo-600'
+                            }`}
+                          >
+                            {channelLabel(v) || '渠道'}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      channelLabel(activeVariant) && (
+                        <span className="bg-white/80 text-slate-500 text-xs font-bold px-2.5 py-0.5 rounded-md border border-white">
+                          {channelLabel(activeVariant)}
+                        </span>
+                      )
+                    )}
+                    <span className="bg-cyan-50/80 text-cyan-600 text-xs font-bold px-2.5 py-0.5 rounded-md border border-cyan-100">
+                      {formatPriceShort(activeVariant)}
+                    </span>
+                  </div>
+
+                  {resolutionEntries.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">清晰度</span>
+                      {resolutionEntries.map(([res, price]) => {
+                        const isDefault = defaultResolution === res;
+                        return (
+                          <span
+                            key={res}
+                            className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${
+                              isDefault
+                                ? 'bg-emerald-50/90 text-emerald-600 border-emerald-200'
+                                : 'bg-white/70 text-slate-500 border-white'
+                            }`}
+                          >
+                            {res} ¥{price}{isDefault ? ' · 默认' : ''}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    i18nText(activeVariant.billing_summary) && (
+                      <p className="text-xs text-slate-500">{i18nText(activeVariant.billing_summary)}</p>
+                    )
+                  )}
+
+                  {i18nText(activeVariant.description) && (
+                    <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">{i18nText(activeVariant.description)}</p>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1">提示词 (Prompt)</label>
@@ -462,7 +705,7 @@ export default function App() {
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1 flex items-center justify-between">
                   <span>参考图 / 垫图 (可选)</span>
-                  <span className="bg-white/60 px-2 py-0.5 rounded-md text-slate-500">{selectedFiles.length}/8</span>
+                  <span className="bg-white/60 px-2 py-0.5 rounded-md text-slate-500">{selectedFiles.length}/{maxRefImages}</span>
                 </label>
                 
                 {selectedFiles.length > 0 && (
@@ -481,13 +724,19 @@ export default function App() {
                   </div>
                 )}
 
-                <label className="flex flex-col items-center justify-center w-full h-14 transition bg-white/30 backdrop-blur-sm border-2 border-indigo-200 border-dashed rounded-2xl appearance-none cursor-pointer hover:bg-white/60 hover:border-indigo-400 hover:shadow-md focus:outline-none">
-                    <span className="flex items-center space-x-2 text-sm text-indigo-500">
-                        <Upload className="w-5 h-5" />
-                        <span className="font-semibold">点击选择图片上传</span>
-                    </span>
-                    <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileChange} />
-                </label>
+                {maxRefImages === 0 ? (
+                  <p className="w-full text-center text-xs text-slate-400 bg-white/30 rounded-2xl px-4 py-4 border border-white/50">
+                    当前模型不支持参考图上传
+                  </p>
+                ) : (
+                  <label className="flex flex-col items-center justify-center w-full h-14 transition bg-white/30 backdrop-blur-sm border-2 border-indigo-200 border-dashed rounded-2xl appearance-none cursor-pointer hover:bg-white/60 hover:border-indigo-400 hover:shadow-md focus:outline-none">
+                      <span className="flex items-center space-x-2 text-sm text-indigo-500">
+                          <Upload className="w-5 h-5" />
+                          <span className="font-semibold">点击选择图片上传（最多 {maxRefImages} 张）</span>
+                      </span>
+                      <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileChange} />
+                  </label>
+                )}
               </div>
 
               <div className="pt-6 mt-4 flex flex-col sm:flex-row items-center justify-between border-t border-white/50 gap-4">
@@ -677,17 +926,23 @@ export default function App() {
                           清空记录
                         </button>
                       </div>
-                      
+                      console.log(history);
                       {history.map((record) => (
                         <div key={record.id} className="bg-white/60 backdrop-blur-md p-5 rounded-2xl border border-white/80 shadow-sm hover:shadow-md transition-shadow group">
                           <div className="flex justify-between items-start mb-4">
                             <div className="space-y-2 pr-4">
-                              <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={record.prompt}>{record.prompt}</p>
+                              {/* <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={record.prompt}>{record.prompt}</p>
                               <div className="flex flex-wrap gap-2 text-xs font-medium text-slate-500">
                                 <span className="bg-indigo-50/80 text-indigo-600 px-2.5 py-1 rounded-md border border-indigo-100/50">{record.model}</span>
                                 <span className="bg-white/80 px-2.5 py-1 rounded-md border border-white">{record.size}</span>
                                 <span className="flex items-center text-slate-400 ml-1">{record.timestamp}</span>
-                              </div>
+                              </div> */}
+                                                            <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={record.input.prompt}>{record.input.prompt}</p>
+                              <div className="flex flex-wrap gap-2 text-xs font-medium text-slate-500">
+                                <span className="bg-indigo-50/80 text-indigo-600 px-2.5 py-1 rounded-md border border-indigo-100/50">{record.model}</span>
+                                <span className="bg-white/80 px-2.5 py-1 rounded-md border border-white">{record.input.size}</span>
+                                <span className="flex items-center text-slate-400 ml-1">{record.created_at}</span>
+                              </div>{/*  */}
                             </div>
                             <button 
                               onClick={() => setHistory(history.filter(h => h.id !== record.id))}
