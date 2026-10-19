@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Settings, Image as ImageIcon, Loader2, Trash2, 
-  CheckCircle2, AlertCircle, Upload, X, Play, Clock, Server, Sparkles, History, Download, Wallet, RefreshCw, User
+  CheckCircle2, AlertCircle, Upload, X, Play, Clock, Server, Sparkles, History, Download, Wallet, RefreshCw, User,
+  ChevronLeft, Info, Braces
 } from 'lucide-react';
 
 const API_BASE = '/pearapi';
@@ -95,9 +96,39 @@ const formatPriceForList = (variants) => {
   return `¥${Math.min(...prices)} 起`;
 };
 
+// 辅助函数：判断任务状态类别（成功/失败/其他）
+const getStatusKind = (statusText) => {
+  const text = String(statusText || '');
+  if (['成功', '成功(Success)', 'completed', 'success'].includes(text)) return 'success';
+  if (['失败', 'failed', 'error'].includes(text)) return 'failed';
+  return 'other';
+};
+
+// 状态徽章样式映射
+const STATUS_STYLES = {
+  success: 'bg-emerald-50/90 text-emerald-600 border-emerald-100',
+  failed: 'bg-rose-50/90 text-rose-600 border-rose-100',
+  other: 'bg-indigo-50/90 text-indigo-600 border-indigo-100',
+};
+
+// 辅助函数：兼容远端任务记录与本地生成记录，取结果图列表
+const getRecordImages = (record) => {
+  if (!record) return [];
+  if (Array.isArray(record.images) && record.images.length > 0) return record.images;
+  if (record.api_file_url) return [record.api_file_url];
+  return [];
+};
+
+// 辅助函数：兼容取提示词/尺寸/模型/时间（远端字段在 input 内，本地记录在顶层）
+const getRecordPrompt = (record) => record?.input?.prompt ?? record?.prompt ?? '';
+const getRecordSize = (record) => record?.input?.size ?? record?.size ?? '';
+const getRecordModel = (record) => record?.model ?? '';
+const getRecordTime = (record) => record?.created_at ?? record?.timestamp ?? '';
+
 export default function App() {
   // --- 状态管理 ---
   const [apiKey, setApiKey] = useState(() => getStoredItem('pear_api_key', '3e93dd710fb64a2d'));
+  const [privateKey, setPrivateKey] = useState(() => getStoredItem('pear_private_key', 'ce0cbc30-1691-48d7-ab7c-d410c646c97b')); // 任务列表/详情查询用
   const [apiModels, setApiModels] = useState(loadCachedModels);
   const [isModelsLoading, setIsModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState('');
@@ -111,6 +142,7 @@ export default function App() {
   const [prompt, setPrompt] = useState('');
   const [selectedModel, setSelectedModel] = useState(() => loadCachedModels()[0]?.model_id || '');
   const [activeVariantId, setActiveVariantId] = useState(null); // 当前选中模型的渠道变体 id
+  const [selectedResolution, setSelectedResolution] = useState(null); // 当前选中的清晰度档位（如 "2K"）
   const [size, setSize] = useState('16:9');
   const [taskType, setTaskType] = useState('async'); 
   const [selectedFiles, setSelectedFiles] = useState([]);
@@ -125,6 +157,11 @@ export default function App() {
   // 历史记录与视图状态
   const [history, setHistory] = useState(() => getStoredItem('pear_history', []));
   const [view, setView] = useState('current'); // 'current' | 'history'
+  const [selectedRecord, setSelectedRecord] = useState(null); // 当前查看详情的任务记录
+  const [isDetailLoading, setIsDetailLoading] = useState(false); // 详情接口刷新中
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1); // 任务列表当前页码
+  const [historyHasMore, setHistoryHasMore] = useState(false); // 是否还有下一页
   const currentGenRef = useRef({ prompt: '', model: '', size: '' });
 
   const pollTimeoutRef = useRef(null);
@@ -146,8 +183,8 @@ export default function App() {
   }, [selectedVariants, activeVariantId]);
 
   const sizeOptions = useMemo(() => {
-    const parsed = parseAspectRatios(activeVariant?.aspect_ratio);
-    return parsed.length > 0 ? parsed : DEFAULT_SIZES;
+    const parsed = parseAspectRatios(activeVariant?.aspect_ratio).filter(r => r !== 'auto');
+    return parsed.length > 0 ? ['auto', ...parsed] : DEFAULT_SIZES;
   }, [activeVariant]);
 
   const maxRefImages = activeVariant?.reference_image != null
@@ -162,25 +199,76 @@ export default function App() {
 
   const defaultResolution = activeVariant?.billing_detail?.default_resolution || '';
 
-  // --- 获取历史记录接口 ---
-  const fetchHistory = async () => {
-    if (!apiKey) return;
-    // setIsHistoryLoading(true);
-    console.log(apiKey);
+  // --- 获取历史记录接口（POST 任务列表，支持分页） ---
+  const fetchHistory = async (page = 1) => {
+    if (!privateKey) return;
+    setIsHistoryLoading(true);
     try {
-      
-      const response = await fetch(`${API_BASE}/system/auth/task/list?private_key=2d992495-989a-489f-9c64-0b1a722685d1&page=1&pageSize=20`);
+      const response = await fetch(`${API_BASE}/system/auth/task/list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          private_key: privateKey,
+          page,
+          pageSize: 20,
+        })
+      });
       const data = await response.json();
       if (data.code === 200) {
-        // console.log(data.data.list);
-        setHistory(data.data.list || []);
-        console.log('His=>', history);
+        const list = data.data?.list || [];
+        const pagination = data.data?.pagination || {};
+        setHistory(prev => (page > 1 ? [...prev, ...list] : list));
+        setHistoryPage(page);
+        setHistoryHasMore(Boolean(pagination.has_more));
       }
     } catch (err) {
       console.error('Error fetching history:', err);
     } finally {
-      // setIsHistoryLoading(false);
+      setIsHistoryLoading(false);
     }
+  };
+
+  // --- 按 task_id 查询任务详情（逗号分隔最多 10 个，这里单个查询） ---
+  const fetchTaskDetail = async (taskId) => {
+    if (!privateKey || !taskId) return;
+    setIsDetailLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/system/auth/task/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          private_key: privateKey,
+          task_id: taskId,
+        })
+      });
+      const data = await response.json();
+      if (data.code === 200) {
+        // 兼容多种返回结构：数组 / { list } / 单对象
+        const payload = data.data;
+        let detail = null;
+        if (Array.isArray(payload)) {
+          detail = payload.find(t => t?.task_id === taskId) || payload[0];
+        } else if (Array.isArray(payload?.list)) {
+          detail = payload.list.find(t => t?.task_id === taskId) || payload.list[0];
+        } else if (payload && typeof payload === 'object') {
+          detail = payload;
+        }
+        if (detail) {
+          // 仅当用户仍停留在该任务详情时更新
+          setSelectedRecord(prev => (prev && prev.task_id === taskId ? { ...prev, ...detail } : prev));
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching task detail:', err);
+    } finally {
+      setIsDetailLoading(false);
+    }
+  };
+
+  // --- 点击列表项查看详情：先展示列表数据，再异步刷新最新状态 ---
+  const handleOpenDetail = (record) => {
+    setSelectedRecord(record);
+    if (record.task_id) fetchTaskDetail(record.task_id);
   };
 
   // --- 获取余额接口 ---
@@ -202,28 +290,34 @@ export default function App() {
     }
   };
 
-  // // --- 副作用 ---
-  // useEffect(() => {
-  //   setStoredItem('pear_api_key', apiKey);
-  //   if (apiKey) {
-  //     fetchBalance();
-  //   } else {
-  //     setBalanceData(null);
-  //   }
-  // }, [apiKey]);
+  // --- 副作用 ---
+  useEffect(() => {
+    setStoredItem('pear_api_key', apiKey);
+    if (apiKey) {
+      fetchBalance();
+    } else {
+      setBalanceData(null);
+    }
+  }, [apiKey]);
 
-    // --- 副作用 ---
-    useEffect(() => {
-      setStoredItem('pear_api_key', apiKey);
-      if (apiKey) {
-        fetchBalance();
-        fetchHistory()
-        if (view === 'history') fetchHistory();
-      } else {
-        setBalanceData(null);
-        setHistory([]);
-      }
-    }, [apiKey]);
+  // privateKey 变化时持久化并重新拉取任务列表第一页
+  useEffect(() => {
+    setStoredItem('pear_private_key', privateKey);
+    if (privateKey) {
+      fetchHistory(1);
+    } else {
+      setHistory([]);
+      setHistoryPage(1);
+      setHistoryHasMore(false);
+    }
+  }, [privateKey]);
+
+  // 切换到历史视图时刷新任务列表第一页
+  useEffect(() => {
+    if (view === 'history' && privateKey) {
+      fetchHistory(1);
+    }
+  }, [view]);
 
   // --- 获取模型列表接口 ---
   const fetchModels = async () => {
@@ -259,9 +353,14 @@ export default function App() {
 
   useEffect(() => {
     if (sizeOptions.length > 0 && !sizeOptions.includes(size)) {
-      setSize(sizeOptions[0]);
+      setSize('auto');
     }
   }, [sizeOptions, size]);
+
+  // 切换模型/渠道后，清晰度自动预选该变体的默认档位
+  useEffect(() => {
+    setSelectedResolution(defaultResolution || null);
+  }, [defaultResolution]);
 
   useEffect(() => {
     setSelectedFiles(files => (files.length > maxRefImages ? files.slice(0, maxRefImages) : files));
@@ -352,6 +451,11 @@ export default function App() {
     let options = { method: 'POST' };
 
     try {
+      // 清晰度参数：仅当所选档位属于当前模型变体的 resolution_prices 时传递（小写，如 "2k"）
+      const resolutionParam = resolutionEntries.some(([k]) => k === selectedResolution)
+        ? selectedResolution.toLowerCase()
+        : null;
+
       if (selectedFiles.length > 0) {
         const formData = new FormData();
         formData.append('key', apiKey);
@@ -359,6 +463,7 @@ export default function App() {
         formData.append('model', selectedModel);
         formData.append('size', size);
         formData.append('task_type', taskType);
+        if (resolutionParam) formData.append('resolution', resolutionParam);
         
         selectedFiles.forEach((file) => {
           formData.append('images[]', file);
@@ -371,7 +476,8 @@ export default function App() {
           prompt,
           model: selectedModel,
           size,
-          task_type: taskType
+          task_type: taskType,
+          ...(resolutionParam ? { resolution: resolutionParam } : {})
         });
       }
 
@@ -473,6 +579,16 @@ export default function App() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-..."
+                className="w-full bg-white/50 backdrop-blur-sm border border-white/60 rounded-xl px-4 py-2.5 text-sm text-slate-800 focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none transition-all shadow-inner"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-600">Private Key（任务查询）</label>
+              <input
+                type="text"
+                value={privateKey}
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder="private_key"
                 className="w-full bg-white/50 backdrop-blur-sm border border-white/60 rounded-xl px-4 py-2.5 text-sm text-slate-800 focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none transition-all shadow-inner"
               />
             </div>
@@ -664,18 +780,21 @@ export default function App() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">清晰度</span>
                       {resolutionEntries.map(([res, price]) => {
+                        const isSelected = selectedResolution === res;
                         const isDefault = defaultResolution === res;
                         return (
-                          <span
+                          <button
                             key={res}
-                            className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${
-                              isDefault
-                                ? 'bg-emerald-50/90 text-emerald-600 border-emerald-200'
-                                : 'bg-white/70 text-slate-500 border-white'
+                            type="button"
+                            onClick={() => setSelectedResolution(res)}
+                            className={`text-xs font-bold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm'
+                                : 'bg-white/70 text-slate-500 border-white hover:border-emerald-300 hover:text-emerald-600'
                             }`}
                           >
                             {res} ¥{price}{isDefault ? ' · 默认' : ''}
-                          </span>
+                          </button>
                         );
                       })}
                     </div>
@@ -775,14 +894,14 @@ export default function App() {
             <div className="p-5 border-b border-white/50 bg-white/30 flex justify-between items-center z-10">
               <div className="flex items-center gap-4">
                 <button 
-                  onClick={() => setView('current')}
+                  onClick={() => { setView('current'); setSelectedRecord(null); }}
                   className={`font-bold flex items-center gap-2 text-lg transition-colors ${view === 'current' ? 'text-indigo-800' : 'text-slate-400 hover:text-indigo-500'}`}
                 >
                   <ImageIcon className={`w-5 h-5 ${view === 'current' ? 'text-indigo-500' : ''}`} /> 创作结果
                 </button>
                 <div className="w-px h-5 bg-white/60"></div>
                 <button 
-                  onClick={() => setView('history')}
+                  onClick={() => { setView('history'); setSelectedRecord(null); }}
                   className={`font-bold flex items-center gap-2 text-lg transition-colors ${view === 'history' ? 'text-indigo-800' : 'text-slate-400 hover:text-indigo-500'}`}
                 >
                   <History className={`w-5 h-5 ${view === 'history' ? 'text-indigo-500' : ''}`} /> 历史记录
@@ -905,10 +1024,128 @@ export default function App() {
                 </div>
               )}
 
-              {/* --- 历史记录视图 --- */}
-              {view === 'history' && (
+              {/* --- 历史记录视图：详情 --- */}
+              {view === 'history' && selectedRecord && (
                 <div className="w-full h-full absolute inset-0 p-6 md:p-8 overflow-y-auto custom-scrollbar">
-                  {history.length === 0 ? (
+                  {/* 顶部返回栏 */}
+                  <div className="flex items-center justify-between gap-3 mb-6">
+                    <button
+                      onClick={() => setSelectedRecord(null)}
+                      className="flex items-center gap-1.5 text-sm font-bold text-slate-500 hover:text-indigo-600 bg-white/60 border border-white/80 px-3 py-2 rounded-xl shadow-sm transition-colors"
+                    >
+                      <ChevronLeft className="w-4 h-4" /> 返回列表
+                    </button>
+                    {selectedRecord.task_id && (
+                      <span
+                        className="text-xs font-mono text-slate-400 bg-white/60 border border-white/80 px-3 py-2 rounded-xl shadow-sm truncate max-w-[60%]"
+                        title={selectedRecord.task_id}
+                      >
+                        ID: {selectedRecord.task_id}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col lg:flex-row gap-6 pb-10">
+                    {/* 左侧：结果图片预览 */}
+                    <div className="lg:w-1/2 space-y-4 shrink-0">
+                      {getRecordImages(selectedRecord).length > 0 ? (
+                        getRecordImages(selectedRecord).map((url, i) => (
+                          <div key={i} className="relative group rounded-2xl overflow-hidden border-[4px] border-white/80 bg-white shadow-lg">
+                            <div className="flex items-center justify-center bg-slate-50 text-slate-400 text-sm font-medium min-h-[120px]">载入中...</div>
+                            <img
+                              src={url}
+                              alt={`Result ${i + 1}`}
+                              className="w-full object-contain max-h-[60vh] relative z-10 bg-slate-50"
+                            />
+                            <div className="absolute inset-x-0 bottom-0 z-20 p-3 flex justify-end gap-2 bg-gradient-to-t from-indigo-900/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="bg-white/30 backdrop-blur-md text-white border border-white/40 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-white/50 transition-colors"
+                              >
+                                查看原图 ↗
+                              </a>
+                              <button
+                                onClick={() => handleDownload(url, i)}
+                                className="bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 shadow hover:bg-indigo-600 transition-all active:scale-95"
+                              >
+                                <Download className="w-3.5 h-3.5" /> 下载
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="h-64 flex flex-col items-center justify-center gap-3 text-slate-400 bg-white/40 rounded-2xl border border-white/60">
+                          <ImageIcon className="w-10 h-10 opacity-40" />
+                          <p className="text-sm">暂无结果图片</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 右侧：基本信息与请求参数 */}
+                    <div className="lg:w-1/2 space-y-4 min-w-0">
+                      <div className="bg-white/60 backdrop-blur-md rounded-2xl border border-white/80 shadow-sm p-5 space-y-4">
+                        <h4 className="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                          <Info className="w-4 h-4 text-indigo-400" /> 基本信息
+                          {isDetailLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />}
+                        </h4>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-3.5">
+                          {[
+                            { label: '状态', value: selectedRecord.status || (selectedRecord.task_id ? '-' : '成功') },
+                            { label: '模型', value: getRecordModel(selectedRecord) || '-' },
+                            { label: '类型', value: selectedRecord.task_type || '-' },
+                            { label: '模式', value: selectedRecord.mode || '-' },
+                            { label: '进度', value: selectedRecord.progress != null ? `${selectedRecord.progress}%` : '-' },
+                            { label: '扣费', value: selectedRecord.billing_amount != null ? String(selectedRecord.billing_amount) : '-' },
+                            { label: '耗时', value: selectedRecord.duration_seconds != null ? `${selectedRecord.duration_seconds}s` : '-' },
+                            { label: '生成时间', value: getRecordTime(selectedRecord) || '-' },
+                          ].map(item => (
+                            <div key={item.label} className="space-y-1 min-w-0">
+                              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{item.label}</p>
+                              {item.label === '状态' ? (
+                                <span className={`inline-block text-xs font-bold px-2.5 py-0.5 rounded-md border ${STATUS_STYLES[getStatusKind(item.value)]}`}>
+                                  {item.value}
+                                </span>
+                              ) : (
+                                <p className="text-sm font-semibold text-slate-700 truncate" title={item.value}>{item.value}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {getRecordPrompt(selectedRecord) && (
+                          <div className="space-y-1 pt-1 border-t border-white/60">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pt-2">提示词</p>
+                            <p className="text-sm text-slate-600 leading-relaxed">{getRecordPrompt(selectedRecord)}</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="bg-white/60 backdrop-blur-md rounded-2xl border border-white/80 shadow-sm p-5 space-y-3">
+                        <h4 className="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                          <Braces className="w-4 h-4 text-cyan-500" /> 请求参数
+                        </h4>
+                        <pre className="text-[11px] leading-relaxed text-slate-600 bg-white/70 border border-white/80 rounded-xl p-4 overflow-x-auto font-mono whitespace-pre-wrap break-all custom-scrollbar">
+                          {JSON.stringify(
+                            selectedRecord.input || {
+                              prompt: selectedRecord.prompt,
+                              model: selectedRecord.model,
+                              size: selectedRecord.size,
+                            },
+                            null,
+                            2
+                          )}
+                        </pre>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* --- 历史记录视图：列表 --- */}
+              {view === 'history' && !selectedRecord && (
+                <div className="w-full h-full absolute inset-0 p-6 md:p-8 overflow-y-auto custom-scrollbar">
+                  {history.length === 0 && !isHistoryLoading ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4">
                       <History className="w-16 h-16 opacity-30" />
                       <p className="text-sm font-medium">暂无生成记录</p>
@@ -916,61 +1153,110 @@ export default function App() {
                   ) : (
                     <div className="space-y-4 pb-10">
                       <div className="flex justify-between items-center mb-6">
-                        <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">最近生成 (最多保存50条)</span>
-                        <button 
-                          onClick={() => {
-                            if(window.confirm('确定要清空所有历史记录吗？')) setHistory([]);
-                          }}
-                          className="text-xs text-rose-500 hover:text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-lg transition-colors font-medium border border-rose-100 shadow-sm"
-                        >
-                          清空记录
-                        </button>
-                      </div>
-                      console.log(history);
-                      {history.map((record) => (
-                        <div key={record.id} className="bg-white/60 backdrop-blur-md p-5 rounded-2xl border border-white/80 shadow-sm hover:shadow-md transition-shadow group">
-                          <div className="flex justify-between items-start mb-4">
-                            <div className="space-y-2 pr-4">
-                              {/* <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={record.prompt}>{record.prompt}</p>
-                              <div className="flex flex-wrap gap-2 text-xs font-medium text-slate-500">
-                                <span className="bg-indigo-50/80 text-indigo-600 px-2.5 py-1 rounded-md border border-indigo-100/50">{record.model}</span>
-                                <span className="bg-white/80 px-2.5 py-1 rounded-md border border-white">{record.size}</span>
-                                <span className="flex items-center text-slate-400 ml-1">{record.timestamp}</span>
-                              </div> */}
-                                                            <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={record.input.prompt}>{record.input.prompt}</p>
-                              <div className="flex flex-wrap gap-2 text-xs font-medium text-slate-500">
-                                <span className="bg-indigo-50/80 text-indigo-600 px-2.5 py-1 rounded-md border border-indigo-100/50">{record.model}</span>
-                                <span className="bg-white/80 px-2.5 py-1 rounded-md border border-white">{record.input.size}</span>
-                                <span className="flex items-center text-slate-400 ml-1">{record.created_at}</span>
-                              </div>{/*  */}
-                            </div>
-                            <button 
-                              onClick={() => setHistory(history.filter(h => h.id !== record.id))}
-                              className="text-slate-400 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded-xl shadow-sm shrink-0 border border-white/80"
-                              title="删除记录"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                          
-                          <div className="grid grid-cols-4 sm:grid-cols-5 xl:grid-cols-6 gap-3">
-                            {record.images.map((url, i) => (
-                              <div 
-                                key={i}
-                                className="relative rounded-xl overflow-hidden aspect-square border-2 border-white/80 shadow-sm hover:border-indigo-300 transition-all bg-slate-50 group/img"
-                              >
-                                <img src={url} alt="History thumbnail" className="w-full h-full object-cover group-hover/img:scale-110 transition-transform duration-500" loading="lazy" />
-                                <button 
-                                  onClick={() => handleDownload(url, i)}
-                                  className="absolute bottom-1 right-1 bg-white/80 backdrop-blur-sm p-1 rounded shadow-sm opacity-0 group-hover/img:opacity-100 transition-opacity"
-                                >
-                                  <Download className="w-3 h-3 text-indigo-600" />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
+                        <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">任务列表（共 {history.length} 条）</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => fetchHistory(1)}
+                            disabled={isHistoryLoading || !privateKey}
+                            title="刷新任务列表"
+                            className="text-indigo-500 hover:text-indigo-600 bg-white/60 hover:bg-white px-2.5 py-1.5 rounded-lg transition-colors border border-white/80 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isHistoryLoading ? 'animate-spin' : ''}`} />
+                          </button>
+                          <button 
+                            onClick={() => {
+                              if(window.confirm('确定要清空所有历史记录吗？')) setHistory([]);
+                            }}
+                            className="text-xs text-rose-500 hover:text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-lg transition-colors font-medium border border-rose-100 shadow-sm"
+                          >
+                            清空记录
+                          </button>
                         </div>
-                      ))}
+                      </div>
+                      {history.map((record) => {
+                        const statusKind = getStatusKind(record.status || (record.task_id ? '' : '成功'));
+                        const images = getRecordImages(record);
+                        return (
+                          <div
+                            key={record.id}
+                            onClick={() => handleOpenDetail(record)}
+                            className="bg-white/60 backdrop-blur-md p-5 rounded-2xl border border-white/80 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all group cursor-pointer"
+                          >
+                            <div className="flex justify-between items-start mb-4">
+                              <div className="space-y-2 pr-4 flex-1 min-w-0">
+                                <p className="font-bold text-slate-700 text-sm line-clamp-2 leading-relaxed" title={getRecordPrompt(record)}>
+                                  {getRecordPrompt(record) || '（无提示词）'}
+                                </p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500">
+                                  <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border ${STATUS_STYLES[statusKind]}`}>
+                                    {statusKind === 'success' && <CheckCircle2 className="w-3 h-3" />}
+                                    {statusKind === 'failed' && <AlertCircle className="w-3 h-3" />}
+                                    {statusKind === 'other' && <Clock className="w-3 h-3" />}
+                                    {record.status || (record.task_id ? '进行中' : '成功')}
+                                  </span>
+                                  {getRecordModel(record) && (
+                                    <span className="bg-indigo-50/80 text-indigo-600 px-2.5 py-1 rounded-md border border-indigo-100/50">{getRecordModel(record)}</span>
+                                  )}
+                                  {getRecordSize(record) && (
+                                    <span className="bg-white/80 px-2.5 py-1 rounded-md border border-white">{getRecordSize(record)}</span>
+                                  )}
+                                  {record.billing_amount != null && (
+                                    <span className="bg-cyan-50/80 text-cyan-600 px-2.5 py-1 rounded-md border border-cyan-100/50">¥{record.billing_amount}</span>
+                                  )}
+                                  <span className="flex items-center text-slate-400 ml-1">{getRecordTime(record)}</span>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHistory(history.filter(h => h.id !== record.id));
+                                }}
+                                className="text-slate-400 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded-xl shadow-sm shrink-0 border border-white/80"
+                                title="删除记录"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                            
+                            {images.length > 0 && (
+                              <div className="grid grid-cols-4 sm:grid-cols-5 xl:grid-cols-6 gap-3">
+                                {images.map((url, i) => (
+                                  <div 
+                                    key={i}
+                                    className="relative rounded-xl overflow-hidden aspect-square border-2 border-white/80 shadow-sm hover:border-indigo-300 transition-all bg-slate-50 group/img"
+                                  >
+                                    <img src={url} alt="History thumbnail" className="w-full h-full object-cover group-hover/img:scale-110 transition-transform duration-500" loading="lazy" />
+                                    <button 
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDownload(url, i);
+                                      }}
+                                      className="absolute bottom-1 right-1 bg-white/80 backdrop-blur-sm p-1 rounded shadow-sm opacity-0 group-hover/img:opacity-100 transition-opacity"
+                                    >
+                                      <Download className="w-3 h-3 text-indigo-600" />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {historyHasMore && (
+                        <div className="flex justify-center pt-2">
+                          <button
+                            onClick={() => fetchHistory(historyPage + 1)}
+                            disabled={isHistoryLoading}
+                            className="flex items-center gap-2 text-sm font-bold text-indigo-600 bg-white/70 hover:bg-white border border-indigo-200 px-6 py-2.5 rounded-xl shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isHistoryLoading ? (
+                              <><Loader2 className="w-4 h-4 animate-spin" /> 加载中...</>
+                            ) : (
+                              <>加载更多</>
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
