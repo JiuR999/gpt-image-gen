@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Settings, Image as ImageIcon, Loader2, Trash2, 
   CheckCircle2, AlertCircle, Upload, X, Play, Clock, Server, Sparkles, History, Download, Wallet, RefreshCw, User,
-  ChevronLeft, Info, Braces
+  ChevronLeft, Info, Braces, Plus
 } from 'lucide-react';
 
 const API_BASE = '/pearapi';
@@ -162,6 +162,7 @@ export default function App() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [historyPage, setHistoryPage] = useState(1); // 任务列表当前页码
   const [historyHasMore, setHistoryHasMore] = useState(false); // 是否还有下一页
+  const [showCreateModal, setShowCreateModal] = useState(false); // 移动端创建弹窗
   const currentGenRef = useRef({ prompt: '', model: '', size: '' });
 
   const pollTimeoutRef = useRef(null);
@@ -697,7 +698,7 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 flex flex-col xl:flex-row gap-6 lg:gap-8 custom-scrollbar">
           
           {/* 左半部分：生成表单 */}
-          <div className="w-full xl:w-1/2 space-y-6 flex flex-col">
+          <div className="w-full xl:w-1/2 space-y-6 flex flex-col hidden md:flex">
             
             <div className="bg-white/40 backdrop-blur-2xl rounded-3xl p-6 md:p-8 shadow-[0_8px_32px_0_rgba(31,38,135,0.05)] border border-white/60 space-y-6">
               <h2 className="text-2xl font-extrabold mb-2 flex items-center gap-2 text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-cyan-500">
@@ -890,7 +891,225 @@ export default function App() {
           </div>
 
           {/* 右半部分：结果展示区 */}
-          <div className="w-full xl:w-1/2 flex flex-col bg-white/40 backdrop-blur-2xl rounded-3xl shadow-[0_8px_32px_0_rgba(31,38,135,0.05)] border border-white/60 overflow-hidden min-h-[500px]">
+          <div className="w-full xl:w-1/2 flex flex-col bg-white/40 backdrop-blur-2xl rounded-3xl shadow-[0_8px_32px_0_rgba(31,38,135,0.05)] border border-white/60 overflow-hidden min-h-[500px] relative">
+            {/* 移动端 FAB 按钮 */}
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="md:hidden fixed bottom-6 right-6 w-14 h-14 bg-gradient-to-br from-indigo-500 to-blue-600 text-white rounded-full shadow-[0_8px_24px_rgba(99,102,241,0.4)] flex items-center justify-center z-50 hover:scale-110 active:scale-95 transition-all"
+            >
+              <Plus className="w-7 h-7" />
+            </button>
+
+            {/* 移动端底部抽屉遮罩 */}
+            {showCreateModal && (
+              <div
+                className="md:hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
+                onClick={() => {}}
+              />
+            )}
+
+            {/* 移动端底部抽屉 */}
+            {showCreateModal && (
+              <div className="md:hidden fixed inset-x-0 bottom-0 bg-white/95 backdrop-blur-2xl rounded-t-3xl shadow-[0_-8px_32px_rgba(0,0,0,0.1)] z-50 max-h-[90vh] overflow-y-auto custom-scrollbar transform transition-transform duration-300 ease-out">
+                <div className="sticky top-0 bg-white/95 backdrop-blur-2xl p-4 border-b border-white/60 flex items-center justify-between rounded-t-3xl">
+                  <h2 className="text-lg font-bold text-indigo-600 flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-cyan-500" /> 创建新创作
+                  </h2>
+                  <button
+                    onClick={() => setShowCreateModal(false)}
+                    className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors"
+                  >
+                    <X className="w-5 h-5 text-slate-600" />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-6">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1">选择模型</label>
+                      <select
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                        disabled={isModelsLoading && apiModels.length === 0}
+                        className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-4 py-3 text-sm font-medium focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none shadow-inner text-slate-700 cursor-pointer disabled:cursor-wait"
+                      >
+                        {modelGroups.length === 0 && (
+                          <option value="">{isModelsLoading ? '模型列表加载中...' : '暂无可用模型'}</option>
+                        )}
+                        {modelGroups.map(variants => (
+                          <option key={variants[0].model_id} value={variants[0].model_id}>
+                            {variants[0].model_name}（{formatPriceForList(variants)}）
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1">图像尺寸</label>
+                      <select
+                        value={size}
+                        onChange={(e) => setSize(e.target.value)}
+                        className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-4 py-3 text-sm font-medium focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none shadow-inner text-slate-700 cursor-pointer"
+                      >
+                        {sizeOptions.map(r => (
+                          <option key={r} value={r}>{r === 'auto' ? 'Auto (自动)' : r}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {activeVariant && (
+                    <div className="bg-white/40 backdrop-blur-sm border border-white/60 rounded-2xl p-4 space-y-2 shadow-inner">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {activeVariant.provider && (
+                          <span className="bg-indigo-50/80 text-indigo-600 text-xs font-bold px-2.5 py-0.5 rounded-md border border-indigo-100">
+                            {activeVariant.provider}
+                          </span>
+                        )}
+                        {selectedVariants.length > 1 ? (
+                          selectedVariants.map(v => {
+                            const isActive = v.id === activeVariant.id;
+                            return (
+                              <button
+                                key={v.id}
+                                type="button"
+                                onClick={() => setActiveVariantId(v.id)}
+                                title={`切换到${channelLabel(v) || '该渠道'}（${formatPriceShort(v)}）`}
+                                className={`text-xs font-bold px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                                  isActive
+                                    ? 'bg-indigo-500 text-white border-indigo-500 shadow-sm'
+                                    : 'bg-white/80 text-slate-500 border-white hover:border-indigo-300 hover:text-indigo-600'
+                                }`}
+                              >
+                                {channelLabel(v) || '渠道'}
+                              </button>
+                            );
+                          })
+                        ) : (
+                          channelLabel(activeVariant) && (
+                            <span className="bg-white/80 text-slate-500 text-xs font-bold px-2.5 py-0.5 rounded-md border border-white">
+                              {channelLabel(activeVariant)}
+                            </span>
+                          )
+                        )}
+                        <span className="bg-cyan-50/80 text-cyan-600 text-xs font-bold px-2.5 py-0.5 rounded-md border border-cyan-100">
+                          {formatPriceShort(activeVariant)}
+                        </span>
+                      </div>
+
+                      {resolutionEntries.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">清晰度</span>
+                          {resolutionEntries.map(([res, price]) => {
+                            const isSelected = selectedResolution === res;
+                            const isDefault = defaultResolution === res;
+                            return (
+                              <button
+                                key={res}
+                                type="button"
+                                onClick={() => setSelectedResolution(res)}
+                                className={`text-xs font-bold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm'
+                                    : 'bg-white/70 text-slate-500 border-white hover:border-emerald-300 hover:text-emerald-600'
+                                }`}
+                              >
+                                {res} ¥{price}{isDefault ? ' · 默认' : ''}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        i18nText(activeVariant.billing_summary) && (
+                          <p className="text-xs text-slate-500">{i18nText(activeVariant.billing_summary)}</p>
+                        )
+                      )}
+
+                      {i18nText(activeVariant.description) && (
+                        <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">{i18nText(activeVariant.description)}</p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1">提示词 (Prompt)</label>
+                    <textarea
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                      placeholder="描述您想要生成的奇妙图像..."
+                      rows={4}
+                      className="w-full bg-white/50 backdrop-blur-md border border-white/80 rounded-2xl px-5 py-4 text-sm focus:bg-white/80 focus:ring-2 focus:ring-indigo-400 outline-none resize-none shadow-inner text-slate-700 placeholder-slate-400"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1 flex items-center justify-between">
+                      <span>参考图 / 垫图 (可选)</span>
+                      <span className="bg-white/60 px-2 py-0.5 rounded-md text-slate-500">{selectedFiles.length}/{maxRefImages}</span>
+                    </label>
+                    
+                    {selectedFiles.length > 0 && (
+                      <div className="flex flex-wrap gap-3 mb-3 p-3 bg-white/30 rounded-2xl border border-white/50 shadow-inner">
+                        {selectedFiles.map((file, idx) => (
+                          <div key={idx} className="relative w-16 h-16 rounded-xl overflow-hidden shadow-sm group">
+                            <img src={URL.createObjectURL(file)} alt="preview" className="w-full h-full object-cover" />
+                            <button 
+                              onClick={() => handleRemoveFile(idx)}
+                              className="absolute inset-0 bg-white/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 flex items-center justify-center text-rose-500 transition-all"
+                            >
+                              <X className="w-5 h-5 drop-shadow-md" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {maxRefImages === 0 ? (
+                      <p className="w-full text-center text-xs text-slate-400 bg-white/30 rounded-2xl px-4 py-4 border border-white/50">
+                        当前模型不支持参考图上传
+                      </p>
+                    ) : (
+                      <label className="flex flex-col items-center justify-center w-full h-14 transition bg-white/30 backdrop-blur-sm border-2 border-indigo-200 border-dashed rounded-2xl appearance-none cursor-pointer hover:bg-white/60 hover:border-indigo-400 hover:shadow-md focus:outline-none">
+                        <span className="flex items-center space-x-2 text-sm text-indigo-500">
+                          <Upload className="w-5 h-5" />
+                          <span className="font-semibold">点击选择图片上传（最多 {maxRefImages} 张）</span>
+                        </span>
+                        <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileChange} />
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="pt-6 mt-4 flex flex-col sm:flex-row items-center justify-between border-t border-white/50 gap-4">
+                    <div className="flex bg-white/40 backdrop-blur-md rounded-xl p-1 border border-white/60 shadow-sm w-full sm:w-auto">
+                      <button
+                        onClick={() => setTaskType('sync')}
+                        className={`flex-1 sm:flex-none px-4 py-2 text-sm font-semibold rounded-lg transition-all ${taskType === 'sync' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                      >
+                        同步等待
+                      </button>
+                      <button
+                        onClick={() => setTaskType('async')}
+                        className={`flex-1 sm:flex-none px-4 py-2 text-sm font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 ${taskType === 'async' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                      >
+                        <Clock className="w-4 h-4" /> 异步轮询
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={handleGenerate}
+                      disabled={status === 'loading' || status === 'queued' || status === 'running'}
+                      className="w-full sm:w-auto bg-gradient-to-br from-indigo-500 to-blue-600 hover:from-indigo-600 hover:to-blue-700 disabled:from-slate-300 disabled:to-slate-300 disabled:text-slate-500 text-white font-bold px-8 py-3 rounded-xl shadow-[0_4px_14px_0_rgba(99,102,241,0.39)] hover:shadow-[0_6px_20px_rgba(99,102,241,0.23)] border border-indigo-400/50 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+                    >
+                      {(status === 'loading' || status === 'queued' || status === 'running') ? (
+                        <><Loader2 className="w-5 h-5 animate-spin" /> 处理中...</>
+                      ) : (
+                        <><Sparkles className="w-5 h-5" /> 立即生成</>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="p-5 border-b border-white/50 bg-white/30 flex justify-between items-center z-10">
               <div className="flex items-center gap-4">
                 <button 
